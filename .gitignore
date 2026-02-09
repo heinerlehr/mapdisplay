@@ -1,0 +1,36 @@
+# Python-generated files
+**/__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+**/*.egg-info
+**/.vscode/
+
+# Virtual environments
+.venv
+# .env
+**/.env
+**/*.png
+**/*.log
+BioMining/extracted_files/
+BioMining/output/
+Yield/results/
+
+**/*.nc
+**/*.code-workspace
+
+**/output*.png
+**/**.bsp
+**/*.html
+
+Yield/lacking_deployments.xlsx
+Yield/mismatched_dates.csv
+WOMAPP.Rproj
+.Rproj.user
+.Rproj
+.Rhistory
+.RDataTmp
+
+*/*/.index.yaml
+TODO.txt
