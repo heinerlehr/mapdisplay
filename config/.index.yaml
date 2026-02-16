@@ -1,0 +1,68 @@
+files:
+  config.yaml:
+    file_path: /home/heiner/software/oceanrainforest/mapdisplay/config/config.yaml
+    level: 0
+    mtime: 1771227613.83632
+index:
+  TrainingEvaluator.singleton:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - iConfig
+  background:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - preprocess
+  iConfig:
+  - depth: 0
+    dict_ref: config.yaml
+    level: 0
+    path: []
+  max_workers:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - preprocess
+  max_zoom_levels:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+  preprocess:
+  - depth: 0
+    dict_ref: config.yaml
+    level: 0
+    path: []
+  tiler:
+  - depth: 0
+    dict_ref: config.yaml
+    level: 0
+    path: []
+  time_range:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+  use_gpu:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - preprocess
+  vars:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+  version_file:
+  - depth: 0
+    dict_ref: config.yaml
+    level: 0
+    path: []

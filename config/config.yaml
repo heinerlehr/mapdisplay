@@ -1,0 +1,17 @@
+iConfig:
+    TrainingEvaluator.singleton: false # disable singleton
+
+version_file: versions.json
+
+preprocess:
+    background: false # whether to run preprocessing in the background (default: false)
+    use_gpu: true # use GPU acceleration for tile resampling with CuPy (requires CuPy installed; default: false)
+    max_workers: 128 # number of parallel workers for tile I/O operations (default: 4)
+
+
+tiler:
+    max_zoom_levels: 0
+    time_range: [2024-01-01, 2024-12-31] # optional time range for tiling (default: null)
+    vars:
+        - suitability
+        
