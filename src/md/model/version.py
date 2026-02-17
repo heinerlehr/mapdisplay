@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import ClassVar, List, Optional
 import orjson
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, config, model_validator
 
 import pandas as pd
 import xarray as xr
@@ -11,10 +11,13 @@ from iconfig.iconfig import iConfig
 from loguru import logger
 
 from md.utils.utils import singleton, read_json
+from md.storage.storage import create_storage
 
 
 class Version(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
+
+    map_file_fn: ClassVar[str] = ".map_version"
     
     ID: ClassVar[str] = "id"
     CREATED_AT: ClassVar[str] = "created_at"
@@ -67,6 +70,21 @@ class Version(BaseModel):
             self.annotations = t_annotations
             versions = Versions()
             versions.update_version(self, save=save)
+
+    @staticmethod
+    def load_versions():
+        storage = create_storage()
+        version_ids = storage.get_stored_versions()
+
+        # Now load versions.json
+        version_file = Path(os.getenv("CONFIG","config")) / iConfig()("version_file", default="versions.json")
+        if not version_file.exists():
+            logger.error(f"Version file '{version_file}' does not exist.")
+            raise FileNotFoundError(f"Version file '{version_file}' does not exist.")
+        data = read_json(version_file)
+        versions = [Version(**row) for _, row in data.iterrows() if row['id'] in version_ids]
+        return versions
+
 
 @singleton
 class Versions(BaseModel):

@@ -10,8 +10,21 @@ preprocess:
 
 
 tiler:
-    max_zoom_levels: 0
+    max_zoom_levels: 2
     time_range: [2024-01-01, 2024-12-31] # optional time range for tiling (default: null)
-    vars:
-        - suitability
-        
+    resolution: 0.25x0.25
+    copernicus_longitude:
+        start: -180
+        end: 180
+    copernicus_latitude:
+        start: -80
+        end: 90    
+    variables:
+        - name: suitability
+          transparent_values: [0.0]
+        - name: limiting_factor
+          exclude_zero_from_transparent: true
+    mask: mask
+
+mapdisplay:
+    debug: true # enable debug mode for detailed logging (default: false)

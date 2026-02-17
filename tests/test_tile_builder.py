@@ -85,7 +85,7 @@ class TestDataRenderer:
         renderer = DataRenderer(use_gpu=False)
         data = np.random.rand(64, 64)  # Normalized data [0, 1]
         
-        colored = renderer.apply_colormap(data, "viridis")
+        colored = renderer.apply_colormap(data, "viridis", transparent_values=[0.0])
         
         # Should be (height, width, 4) with RGBA
         assert colored.shape == (64, 64, 4)

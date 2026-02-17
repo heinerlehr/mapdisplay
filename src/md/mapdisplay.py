@@ -1,4 +1,3 @@
-import os
 import sys
 
 # Argument parsing
@@ -46,6 +45,22 @@ def get_args() -> Namespace:
         dest="version",
         help="Version of the map"
 
+    )
+
+    # Add the -f/--force option
+    parser.add_argument(
+        "-f", "--force",
+        action="store_true",
+        dest="force",
+        help="Force preprocessing even if data is already prepared"
+    )
+
+    # Add the -rc/--recreate-container option
+    parser.add_argument(
+        "-rc", "--recreate-container",
+        action="store_true",
+        dest="recreate_container",
+        help="Recreate container before preprocessing"
     )
 
     args = parser.parse_args()
@@ -107,10 +122,6 @@ if __name__ == '__main__':
     # Find version information
     if args.version:
         version = Versions().get_version(id=args.version)
-    elif (fn := Path('.version')).exists():
-        with open(fn) as version_file:
-            version = version_file.read().strip()
-        version = Versions().get_version(id=version)
     else:
         version = Versions().get_newest_version()
     
@@ -118,14 +129,16 @@ if __name__ == '__main__':
         logger.error("No version information found. Please specify a version using the -v/--version option or ensure a .version file exists.")
         sys.exit(1)
     
-    if not all_prepared(version):
+    recreate_container = args.recreate_container
+    
+    if not all_prepared(version) or args.force:
         logger.info(f"Preprocessing data for version: {version.id} (Created at: {version.created_at}, Mapfile: {version.mapfile})")
-        process = preprocess(version, background=config.get("preprocess.background", default=False))
+        process = preprocess(version, recreate_container=recreate_container, background=config.get("preprocess.background", default=False))
     else:
         process = None
 
     logger.info(f'Mapdisplay starting up with version: {version.id} (Created at: {version.created_at}, Mapfile: {version.mapfile})')
 
-    # start()
+    start()
 
     safe_exit(config=config, process=process, timeout=config.get("preprocess.timeout", default=300))

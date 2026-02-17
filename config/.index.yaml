@@ -2,7 +2,7 @@ files:
   config.yaml:
     file_path: /home/heiner/software/oceanrainforest/mapdisplay/config/config.yaml
     level: 0
-    mtime: 1771227613.83632
+    mtime: 1771343432.9309576
 index:
   TrainingEvaluator.singleton:
   - depth: 1
@@ -16,11 +16,63 @@ index:
     level: 0
     path:
     - preprocess
+  copernicus_latitude:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+  copernicus_longitude:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+  debug:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - mapdisply
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - mapdisplay
+  end:
+  - depth: 2
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+    - copernicus_longitude
+  - depth: 2
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+    - copernicus_latitude
   iConfig:
   - depth: 0
     dict_ref: config.yaml
     level: 0
     path: []
+  mapdisplay:
+  - depth: 0
+    dict_ref: config.yaml
+    level: 0
+    path: []
+  mapdisply:
+  - depth: 0
+    dict_ref: config.yaml
+    level: 0
+    path: []
+  mask:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
   max_workers:
   - depth: 1
     dict_ref: config.yaml
@@ -38,6 +90,25 @@ index:
     dict_ref: config.yaml
     level: 0
     path: []
+  resolution:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+  start:
+  - depth: 2
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+    - copernicus_longitude
+  - depth: 2
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
+    - copernicus_latitude
   tiler:
   - depth: 0
     dict_ref: config.yaml
@@ -55,6 +126,12 @@ index:
     level: 0
     path:
     - preprocess
+  variables:
+  - depth: 1
+    dict_ref: config.yaml
+    level: 0
+    path:
+    - tiler
   vars:
   - depth: 1
     dict_ref: config.yaml

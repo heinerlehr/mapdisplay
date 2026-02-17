@@ -7,12 +7,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Union
 
+import orjson
+
 from pydantic import BaseModel, Field
+from loguru import logger
 
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
-from md.model.tile import TileAddress
+from md.model.models import TileAddress
+from md.model.models import MapDefinition
 
 # Optional (only needed in Azure MSI mode)
 try:
@@ -23,10 +27,10 @@ except Exception:  # pragma: no cover
 
 def _guess_content_type(path: Path) -> str:
     suf = path.suffix.lower()
-    if suf == ".webp":
-        return "image/webp"
     if suf == ".png":
         return "image/png"
+    if suf == ".webp":
+        return "image/webp"
     if suf == ".json":
         return "application/json"
     t, _ = mimetypes.guess_type(str(path))
@@ -91,6 +95,7 @@ class BlobStorage:
                 self._cc.get_container_properties()
             except ResourceNotFoundError:
                 self._cc.create_container()
+                logger.info(f"Created container: {cfg.container}")
 
 ####################################################################################################################
 #   Low-level primitives
@@ -144,6 +149,113 @@ class BlobStorage:
             for chunk in download_stream.chunks():
                 f.write(chunk)
 
+    def delete_blobs_by_pattern(self, *, prefix: str, pattern_suffix: str = ".webp") -> int:
+        """
+        Delete all blobs matching a pattern (e.g., all .webp files) using batch operations.
+        
+        Uses parallel batch deletion which is ~100x faster than deleting one-by-one.
+        
+        Args:
+            prefix: Blob name prefix to search (e.g., "tiles/v1/")
+            pattern_suffix: Only delete blobs ending with this (e.g., ".webp")
+        
+        Returns:
+            Number of blobs deleted
+        """
+        batch_size = 256  # Azure allows up to 256 blobs per batch
+        batch = []
+        count = 0
+        
+        logger.info(f"Listing blobs with prefix: {prefix}")
+        
+        # List and delete in batches for efficiency
+        for blob in self._cc.list_blobs(name_starts_with=prefix, timeout=self._cfg.upload_timeout_s):
+            if blob.name.endswith(pattern_suffix):
+                batch.append(blob.name)
+                
+                # When batch reaches size limit, delete it
+                if len(batch) >= batch_size:
+                    logger.info(f"Deleting batch of {len(batch)} blobs...")
+                    try:
+                        # delete_blobs() processes the batch in parallel on server side
+                        self._cc.delete_blobs(*batch, timeout=self._cfg.upload_timeout_s)
+                        count += len(batch)
+                        logger.info(f"Deleted {count} blobs total so far")
+                    except Exception as e:
+                        logger.error(f"Error deleting batch: {e}")
+                    
+                    batch = []
+        
+        # Delete remaining blobs
+        if batch:
+            logger.info(f"Deleting final batch of {len(batch)} blobs...")
+            try:
+                self._cc.delete_blobs(*batch, timeout=self._cfg.upload_timeout_s)
+                count += len(batch)
+                logger.info(f"Deleted {count} blobs total")
+            except Exception as e:
+                logger.error(f"Error deleting final batch: {e}")
+        
+        logger.info(f"Deletion complete: {count} blobs deleted")
+        return count
+    
+    def delete_container(self) -> bool:
+        """
+        Delete the entire container (much faster than deleting individual blobs).
+        
+        **WARNING:** This deletes EVERYTHING in the container.
+        Only use if you're planning to regenerate all tiles anyway.
+        
+        Returns:
+            True if successful
+        """
+        try:
+            logger.info(f"Deleting container: {self._cfg.container}")
+            self._cc.delete_container(timeout=self._cfg.upload_timeout_s)
+            logger.info("✓ Container deleted")
+            return True
+        except Exception as e:
+            logger.error(f"✗ Failed to delete container: {e}")
+            return False
+    
+    def recreate_container(self) -> bool:
+        """
+        Recreate an empty container.
+        
+        Returns:
+            True if successful
+        """
+        try:
+            logger.info(f"Creating container: {self._cfg.container}")
+            self._cc.create_container(timeout=self._cfg.upload_timeout_s)
+            logger.info("✓ Container created")
+            return True
+        except Exception as e:
+            logger.error(f"✗ Failed to create container: {e}")
+            return False
+
+    def get_stored_versions(self) -> list[str]:
+        """
+        List all versions currently stored in the container by checking for blobs with the "tiles/{version}/" prefix.
+        
+        Returns:
+            List of version strings (e.g., ["v1", "v2"])
+        """
+        versions = set()
+        prefix = "tiles/"
+        for blob in self._cc.list_blobs(name_starts_with=prefix, timeout=self._cfg.upload_timeout_s):
+            parts = blob.name.split('/')
+            if len(parts) > 1:
+                versions.add(parts[1])
+        return sorted(versions)
+
+    def load_map_definition(self, version_id: str) -> MapDefinition:
+        blob_name = f"tiles/{version_id}/map_definition.json"
+        if not self.exists(blob_name=blob_name):
+            return None
+        data = self.load_bytes(blob_name=blob_name)
+        return MapDefinition(**orjson.loads(data))
+
     def load_tile(self, addr: TileAddress) -> bytes:
         return self.load_bytes(blob_name=addr.blob_name())
     
@@ -156,11 +268,13 @@ class BlobStorage:
         return self.exists(blob_name=name)
     
     def has_zarr_file(self, version: str, zarr_file: str|Path) -> bool:
-        name = f"{version}/{zarr_file}"
-        return self.exists(blob_name=name)
+        """Check if a zarr directory exists by checking for blobs with that prefix."""
+        name = f"{version}/{zarr_file}/"
+        blobs = list(self._cc.list_blobs(name_starts_with=name, timeout=self._cfg.upload_timeout_s))
+        return len(blobs) > 0
 
-    def has_tile_subtree(self, *, var: str, species: Union[int, str], time: Union[int, str], z: int) -> bool:
-        prefix = f"{var}/{species}/{time}/{z}/"
+    def has_tile_subtree(self, *, version: str, var: str, species: Union[int, str], time: Union[int, str], z: int) -> bool:
+        prefix = f"tiles/{version}/{var}/{species}/{time}/{z}/"
         blobs = list(self._cc.list_blobs(name_starts_with=prefix, timeout=self._cfg.upload_timeout_s))
         return len(blobs) > 0
 
@@ -173,7 +287,7 @@ class BlobStorage:
         z: int,
         x: int,
         y: int,
-        ext: str = "webp",
+        ext: str = "png",
     ) -> bytes:
         addr = TileAddress(
             var=var,
@@ -192,6 +306,10 @@ class BlobStorage:
             data = f.read()
         self.store_bytes(blob_name=name, data=data, content_type="application/x-netcdf", cache_control="public, max-age=31536000, immutable")
     
+    def store_map_definition(self, remote_path: str, map_definition: dict) -> None:
+        data = orjson.dumps(map_definition)
+        self.store_bytes(blob_name=remote_path, data=data, content_type="application/json", cache_control="public, max-age=31536000, immutable")
+
     def store_zarr(
         self,
         *,
@@ -270,7 +388,7 @@ class BlobStorage:
             current.json
             v1/
               meta.json
-              <var>/<species>/<time>/<z>/<x>/<y>.webp
+              <var>/<species>/<time>/<z>/<x>/<y>.png
 
         Remote layout:
           <remote_root>/current.json
