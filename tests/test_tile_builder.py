@@ -2,9 +2,13 @@
 
 import pytest
 import numpy as np
+import pandas as pd
 import tempfile
 from pathlib import Path
 import xarray as xr
+from unittest.mock import Mock, patch
+
+from iconfig.iconfig import iConfig
 
 from md.preprocess.tile_builder import (
     DataRenderer,
@@ -162,7 +166,7 @@ class TestWebMercatorTiler:
         tiler = WebMercatorTiler()
         
         # 0.1 degree resolution (3600 lon pixels)
-        min_z, max_z = tiler.get_zoom_levels((3600, 3600))
+        min_z, max_z = tiler.get_zoom_levels((3600, 3600), calculate=True)
         assert max_z == 8
 
     def test_get_zoom_levels_medium_resolution(self) -> None:
@@ -170,7 +174,7 @@ class TestWebMercatorTiler:
         tiler = WebMercatorTiler()
         
         # 0.25 degree resolution (1440 lon pixels)
-        min_z, max_z = tiler.get_zoom_levels((720, 1440))
+        min_z, max_z = tiler.get_zoom_levels((720, 1440), calculate=True)
         assert max_z == 6
 
     def test_get_zoom_levels_low_resolution(self) -> None:
@@ -178,7 +182,7 @@ class TestWebMercatorTiler:
         tiler = WebMercatorTiler()
         
         # Low resolution
-        min_z, max_z = tiler.get_zoom_levels((180, 360))
+        min_z, max_z = tiler.get_zoom_levels((180, 360), calculate=True)
         assert max_z <= 5
 
 
@@ -216,17 +220,39 @@ class TestBatchTileBuilder:
     """Test BatchTileBuilder with optimizations."""
 
     @pytest.fixture
+    def test_config(self):
+        """Create a test config with time_range disabled and minimal zoom levels."""
+        from unittest.mock import MagicMock
+        config = MagicMock()
+        # Make the config callable and return None for tiler.time_range
+        config.return_value = None
+        def config_call(key, default=None):
+            if key == "tiler.time_range":
+                return None
+            # Reduce zoom levels for faster tile generation in tests
+            if key == "tiler.max_zoom_levels":
+                return 2
+            # For other configs, return some reasonable defaults
+            if key == "tiler.copernicus_latitude":
+                return {"start": -5, "end": 5}
+            if key == "tiler.copernicus_longitude":
+                return {"start": -5, "end": 5}
+            return default
+        config.side_effect = config_call
+        return config
+
+    @pytest.fixture
     def sample_zarr(self, tmp_path: Path) -> Path:
         """Create a sample zarr file for testing."""
-        # Create sample xarray dataset
-        lat = np.arange(90, -90, -1.0)  # 180 points
-        lon = np.arange(-180, 180, 1.0)  # 360 points
+        # Create sample xarray dataset with minimal resolution for fast testing
+        lat = np.arange(5, -5, -1.0)  # 10 points
+        lon = np.arange(-5, 5, 1.0)   # 10 points
         time = np.arange(0, 3)
         species = ["slat", "mpyr"]
         
-        # Create data variables
+        # Create data variables - minimal size for speed
         suitability = xr.DataArray(
-            np.random.rand(3, 2, 180, 360),
+            np.random.rand(3, 2, 10, 10),
             dims=["time", "species", "latitude", "longitude"],
             coords={
                 "time": time,
@@ -243,9 +269,11 @@ class TestBatchTileBuilder:
         
         return zarr_path
 
-    def test_batch_tile_builder_initialization(self, sample_zarr: Path, tmp_path: Path) -> None:
+    def test_batch_tile_builder_initialization(self, test_config, sample_zarr: Path, tmp_path: Path) -> None:
         """Test BatchTileBuilder initialization with new parameters."""
+        config = test_config
         builder = BatchTileBuilder(
+            config=config,
             zarr_file=sample_zarr,
             output_dir=tmp_path / "tiles",
             variables=[VariableConfig(name="suitability")],
@@ -257,9 +285,12 @@ class TestBatchTileBuilder:
         assert builder.max_workers == 2
         assert builder.renderer.use_gpu is False
 
-    def test_batch_tile_builder_has_pending_tiles_method(self, sample_zarr: Path, tmp_path: Path) -> None:
+    def test_batch_tile_builder_has_pending_tiles_method(self, test_config, sample_zarr: Path, tmp_path: Path) -> None:
         """Test that pending tiles queue exists."""
+        """Test BatchTileBuilder initialization with new parameters."""
+        config = test_config
         builder = BatchTileBuilder(
+            config=config,
             zarr_file=sample_zarr,
             output_dir=tmp_path / "tiles",
             variables=[VariableConfig(name="suitability")],
@@ -270,10 +301,12 @@ class TestBatchTileBuilder:
         # Should have pending_tiles attribute after build starts
         assert hasattr(builder, 'executor') or True  # Executor not created until build()
 
-    def test_build_tiles_batch_with_new_parameters(self, sample_zarr: Path, tmp_path: Path) -> None:
+    def test_build_tiles_batch_with_new_parameters(self, test_config, sample_zarr: Path, tmp_path: Path) -> None:
         """Test build_tiles_batch accepts new optimization parameters."""
         # Should not raise with new parameters
+        config = test_config
         build_tiles_batch(
+            config=config,
             zarr_file=sample_zarr,
             output_dir=tmp_path / "tiles",
             variables=[VariableConfig(name="suitability", colormap="viridis")],
@@ -286,14 +319,14 @@ class TestBatchTileBuilder:
         assert tiles_dir.exists()
         assert any(tiles_dir.glob("**/**.webp"))
 
-    def test_build_tiles_batch_pre_computed_vmin_vmax(self, sample_zarr: Path, tmp_path: Path) -> None:
+    def test_build_tiles_batch_pre_computed_vmin_vmax(self, test_config, sample_zarr: Path, tmp_path: Path) -> None:
         """Test that vmin/vmax are computed once per variable."""
-        variables = [
-            VariableConfig(name="suitability", vmin=None, vmax=None),
-        ]
+        variables = [VariableConfig(name="suitability", vmin=None, vmax=None)]
         
         # Should compute vmin/vmax automatically
+        config = test_config
         build_tiles_batch(
+            config=config,
             zarr_file=sample_zarr,
             output_dir=tmp_path / "tiles",
             variables=variables,
@@ -305,9 +338,11 @@ class TestBatchTileBuilder:
         # (This is verified by successful tile generation)
         assert (tmp_path / "tiles").exists()
 
-    def test_build_tiles_batch_parallel_io(self, sample_zarr: Path, tmp_path: Path) -> None:
+    def test_build_tiles_batch_parallel_io(self, test_config, sample_zarr: Path, tmp_path: Path) -> None:
         """Test parallel I/O with multiple workers."""
+        config = test_config
         build_tiles_batch(
+            config=config,
             zarr_file=sample_zarr,
             output_dir=tmp_path / "tiles",
             variables=[VariableConfig(name="suitability")],
@@ -321,10 +356,12 @@ class TestBatchTileBuilder:
         tile_count = len(list((tmp_path / "tiles").glob("**/**.webp")))
         assert tile_count > 0
 
-    def test_build_tiles_batch_gpu_flag(self, sample_zarr: Path, tmp_path: Path) -> None:
+    def test_build_tiles_batch_gpu_flag(self, test_config, sample_zarr: Path, tmp_path: Path) -> None:
         """Test GPU flag is accepted and handled gracefully."""
         # Should work whether GPU available or not
+        config = test_config
         build_tiles_batch(
+            config=config,
             zarr_file=sample_zarr,
             output_dir=tmp_path / "tiles",
             variables=[VariableConfig(name="suitability")],
@@ -346,8 +383,8 @@ class TestPreprocessIntegration:
         
         config = iConfig()
         # Should be able to read the config without errors
-        use_gpu = config.get("preprocess.use_gpu", default=False)
-        max_workers = config.get("preprocess.max_workers", default=4)
+        use_gpu = config("preprocess.use_gpu", default=False)
+        max_workers = config("preprocess.max_workers", default=4)
         
         assert isinstance(use_gpu, bool)
         assert isinstance(max_workers, int)

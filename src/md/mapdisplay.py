@@ -82,7 +82,7 @@ def safe_exit(config: iConfig, process: Process, timeout: int):
         process: The multiprocessing.Process object (or None if not running in background)
         timeout: Maximum seconds to wait before force-terminating
     """
-    if process is None or not config.get("preprocess.background", default=False):
+    if process is None or not config("preprocess.background", default=False):
         logger.debug("No background preprocessing to wait for")
         return
     
@@ -133,7 +133,7 @@ if __name__ == '__main__':
     
     if not all_prepared(version) or args.force:
         logger.info(f"Preprocessing data for version: {version.id} (Created at: {version.created_at}, Mapfile: {version.mapfile})")
-        process = preprocess(version, recreate_container=recreate_container, background=config.get("preprocess.background", default=False))
+        process = preprocess(version, recreate_container=recreate_container, background=config("preprocess.background", default=False))
     else:
         process = None
 
@@ -141,4 +141,4 @@ if __name__ == '__main__':
 
     start()
 
-    safe_exit(config=config, process=process, timeout=config.get("preprocess.timeout", default=300))
+    safe_exit(config=config, process=process, timeout=config("preprocess.timeout", default=300))

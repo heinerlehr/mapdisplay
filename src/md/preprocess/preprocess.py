@@ -75,8 +75,8 @@ def preprocess(version: Version, recreate_container: bool = False, background: b
 def run_preprocess(version: Version, recreate_container: bool = False):
     # Load configuration
     config = iConfig()
-    use_gpu = config.get("preprocess.use_gpu", default=False)
-    max_workers = config.get("preprocess.max_workers", default=4)
+    use_gpu = config("preprocess.use_gpu", default=False)
+    max_workers = config("preprocess.max_workers", default=4)
     
     # Ensure mapfile exists locally
     mapfile_local_path = version.mapfile

@@ -8,9 +8,8 @@ preprocess:
     use_gpu: true # use GPU acceleration for tile resampling with CuPy (requires CuPy installed; default: false)
     max_workers: 128 # number of parallel workers for tile I/O operations (default: 4)
 
-
 tiler:
-    max_zoom_levels: 2
+    max_zoom_levels: 4
     time_range: [2024-01-01, 2024-12-31] # optional time range for tiling (default: null)
     resolution: 0.25x0.25
     copernicus_longitude:
@@ -24,7 +23,28 @@ tiler:
           transparent_values: [0.0]
         - name: limiting_factor
           exclude_zero_from_transparent: true
+        - name: yield
+          transparent_values: [0.0]
+        - name: availability
+          transparent_values: [0.0]
     mask: mask
 
 mapdisplay:
     debug: true # enable debug mode for detailed logging (default: false)
+
+storage:
+    type: filesystem # storage type: 'azure' or 'filesystem' (default: 'azure')
+    max_workers: 16 # number of parallel workers for storage operations (default: 16)
+    upload_timeout_s: 30 # timeout for upload operations in seconds (default: 30
+    batch_size: 256 # number of tiles to upload in a single batch (default: 100)
+    
+    azure:
+        connection_string: ${AZURE_CONN_STR} # Azure Blob Storage connection string (required if type is 'azure')
+        storage_account: ${AZURE_STORAGE_ACCOUNT_URL} # Azure Storage account name (required if type is 'azure')
+        use_cred: true # whether to use Azure credentials from environment variables (default: false)
+        container_name: "mapdisplay" # Azure Blob Storage container name (default: 'mapdisplay')
+    azurite:
+        connection_string: ${AZURITE_CONN_STR} # Azurite connection string (required if type is 'azurite')
+        container_name: "mapdisplay" # Azurite container name (default: 'mapdisplay')
+    filesystem:
+        container_name: "/tmp/mapdisplay" # subdirectory name for storing tiles (default: 'mapdisplay')

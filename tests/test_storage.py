@@ -14,11 +14,12 @@ import pytest
 
 from md.storage.storage import (
     BlobStorage,
+    FilesystemStorage,
     StorageConfig,
-    TileAddress,
     create_storage,
     _guess_content_type,
 )
+from md.model.models import TileAddress
 
 
 # Default Azurite connection string for local testing
@@ -79,6 +80,7 @@ class TestTileAddress:
 
     def test_default_ext(self) -> None:
         addr = TileAddress(
+            version="v1",
             var="chl",
             species=0,
             time="avg",
@@ -86,21 +88,24 @@ class TestTileAddress:
             x=8,
             y=5,
         )
-        assert addr.ext == "webp"
+        assert addr.ext == "png"
 
     def test_blob_name_default(self) -> None:
         addr = TileAddress(
+            version="v1",
             var="chl",
             species=0,
             time="avg",
             z=4,
             x=8,
             y=5,
+            ext="webp",
         )
-        assert addr.blob_name() == "chl/0/avg/4/8/5.webp"
+        assert addr.blob_name() == "tiles/v1/chl/0/avg/4/8/5.webp"
 
     def test_blob_name_custom_ext(self) -> None:
         addr = TileAddress(
+            version="v2",
             var="temperature",
             species="fish",
             time=12,
@@ -109,11 +114,11 @@ class TestTileAddress:
             y=1,
             ext="png",
         )
-        assert addr.blob_name() == "temperature/fish/12/3/2/1.png"
+        assert addr.blob_name() == "tiles/v2/temperature/fish/12/3/2/1.png"
     
     def test_is_mask(self) -> None:
-        data_addr = TileAddress(var="chl", species=0, time="avg", z=4, x=8, y=5)
-        mask_addr = TileAddress(var="mask", species=0, time="avg", z=4, x=8, y=5)
+        data_addr = TileAddress(version="v1", var="chl", species=0, time="avg", z=4, x=8, y=5)
+        mask_addr = TileAddress(version="v1", var="mask", species=0, time="avg", z=4, x=8, y=5)
         assert data_addr.is_mask() is False
         assert mask_addr.is_mask() is True
 
@@ -236,6 +241,7 @@ class TestLoadTile:
             z=4,
             x=8,
             y=5,
+            ext="webp",
         )
         tile_data = b"fake webp data"
         
@@ -250,12 +256,14 @@ class TestLoadTile:
 
     def test_load_tile_by_parts(self, storage: BlobStorage) -> None:
         addr = TileAddress(
+            version="v1",
             var="temperature",
             species="salmon",
             time=3,
             z=5,
             x=10,
             y=20,
+            ext="webp",
         )
         tile_data = b"temperature tile"
         
@@ -266,17 +274,20 @@ class TestLoadTile:
         )
         
         loaded = storage.load_tile_by_parts(
+            version="v1",
             var="temperature",
             species="salmon",
             time=3,
             z=5,
             x=10,
             y=20,
+            ext="webp",
         )
         assert loaded == tile_data
 
     def test_load_tile_by_parts_custom_ext(self, storage: BlobStorage) -> None:
         addr = TileAddress(
+            version="v1",
             var="oxygen",
             species=99,
             time="avg",
@@ -294,6 +305,7 @@ class TestLoadTile:
         )
         
         loaded = storage.load_tile_by_parts(
+            version="v1",
             var="oxygen",
             species=99,
             time="avg",
@@ -417,48 +429,6 @@ class TestStoreTiles:
             )
             
             assert storage.exists(blob_name="tiles/tile.webp")
-
-
-class TestCreateStorageFactory:
-    """Test the create_storage() factory function."""
-
-    def test_create_storage_with_connection_string(self, azurite_connection_string: str) -> None:
-        """Test creating storage with explicit connection string."""
-        store = create_storage(
-            container="factory-test",
-            connection_string=azurite_connection_string,
-        )
-        
-        # Verify it works
-        store.store_bytes(
-            blob_name="test.txt",
-            data=b"test",
-            content_type="text/plain",
-        )
-        assert store.exists(blob_name="test.txt")
-        
-        # Cleanup
-        store._cc.delete_blob("test.txt")
-
-    def test_create_storage_with_env_variable(self, azurite_connection_string: str) -> None:
-        """Test creating storage using environment variable."""
-        os.environ["AZURE_STORAGE_CONNECTION_STRING"] = azurite_connection_string
-        
-        try:
-            store = create_storage(container="factory-env-test")
-            
-            # Verify it works
-            store.store_bytes(
-                blob_name="test.txt",
-                data=b"test",
-                content_type="text/plain",
-            )
-            assert store.exists(blob_name="test.txt")
-            
-            # Cleanup
-            store._cc.delete_blob("test.txt")
-        finally:
-            del os.environ["AZURE_STORAGE_CONNECTION_STRING"]
 
 
 class TestLoadFile:
@@ -600,13 +570,19 @@ class TestZarrFileCheck:
 
     def test_has_zarr_file_exists(self, storage: BlobStorage) -> None:
         """Test checking for an existing zarr file."""
+        # Store a blob with the zarr prefix (zarr files are directories with multiple blobs)
         storage.store_bytes(
             blob_name="datasets/data.zarr/.zarray",
             data=b'{"zarr_format": 2}',
             content_type="application/json",
         )
+        storage.store_bytes(
+            blob_name="datasets/data.zarr/.zattrs",
+            data=b'{}',
+            content_type="application/json",
+        )
         
-        assert storage.has_zarr_file("datasets", "data.zarr/.zarray")
+        assert storage.has_zarr_file("datasets", "data.zarr")
 
     def test_has_zarr_file_not_exists(self, storage: BlobStorage) -> None:
         """Test checking for a nonexistent zarr file."""
@@ -619,8 +595,13 @@ class TestZarrFileCheck:
             data=b'{"zarr_format": 2}',
             content_type="application/json",
         )
+        storage.store_bytes(
+            blob_name="data/mydata.zarr/.zattrs",
+            data=b'{}',
+            content_type="application/json",
+        )
         
-        assert storage.has_zarr_file("data", Path("mydata.zarr/.zarray"))
+        assert storage.has_zarr_file("data", Path("mydata.zarr"))
 
 
 class TestTileSubtreeCheck:
@@ -630,17 +611,18 @@ class TestTileSubtreeCheck:
         """Test checking for an existing tile subtree."""
         # Create tiles in a specific z-level
         storage.store_bytes(
-            blob_name="chl/0/avg/4/8/5.webp",
+            blob_name="tiles/v1/chl/0/avg/4/8/5.webp",
             data=b"tile",
             content_type="image/webp",
         )
         storage.store_bytes(
-            blob_name="chl/0/avg/4/8/6.webp",
+            blob_name="tiles/v1/chl/0/avg/4/8/6.webp",
             data=b"tile",
             content_type="image/webp",
         )
         
         assert storage.has_tile_subtree(
+            version="v1",
             var="chl",
             species=0,
             time="avg",
@@ -650,6 +632,7 @@ class TestTileSubtreeCheck:
     def test_has_tile_subtree_not_exists(self, storage: BlobStorage) -> None:
         """Test checking for a nonexistent tile subtree."""
         assert not storage.has_tile_subtree(
+            version="v1",
             var="chl",
             species=0,
             time="avg",
@@ -660,13 +643,14 @@ class TestTileSubtreeCheck:
         """Test separating different z-levels."""
         # Create tiles for z=4
         storage.store_bytes(
-            blob_name="temp/0/avg/4/0/0.webp",
+            blob_name="tiles/v1/temp/0/avg/4/0/0.webp",
             data=b"z=4 tile",
             content_type="image/webp",
         )
         
         # Check z=4 exists
         assert storage.has_tile_subtree(
+            version="v1",
             var="temp",
             species=0,
             time="avg",
@@ -675,6 +659,7 @@ class TestTileSubtreeCheck:
         
         # Check z=5 doesn't exist
         assert not storage.has_tile_subtree(
+            version="v1",
             var="temp",
             species=0,
             time="avg",
@@ -861,26 +846,3 @@ class TestStoreZarr:
             assert storage.exists(blob_name="parallel.zarr/.zarray")
             for i in range(10):
                 assert storage.exists(blob_name=f"parallel.zarr/chunk_{i}")
-
-    def test_create_storage_explicit_takes_precedence(self, azurite_connection_string: str) -> None:
-        """Test that explicit connection_string takes precedence over env variable."""
-        os.environ["AZURE_STORAGE_CONNECTION_STRING"] = "wrong_connection_string"
-        
-        try:
-            store = create_storage(
-                container="factory-precedence-test",
-                connection_string=azurite_connection_string,
-            )
-            
-            # Should work with the explicit connection string
-            store.store_bytes(
-                blob_name="test.txt",
-                data=b"test",
-                content_type="text/plain",
-            )
-            assert store.exists(blob_name="test.txt")
-            
-            # Cleanup
-            store._cc.delete_blob("test.txt")
-        finally:
-            del os.environ["AZURE_STORAGE_CONNECTION_STRING"]

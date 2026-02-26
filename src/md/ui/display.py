@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from PIL import Image
 
 from pathlib import Path
 import param
@@ -83,7 +84,11 @@ async def root():
 @lru_cache(maxsize=1000)
 def _load_tile_cached(version: str, var: str, species: str, time: str, z: int, x: int, y: int) -> bytes:
     """Load and cache tile bytes in memory."""
-    ta = TileAddress(version=version, var=var, species=species, time=time, z=z, x=x, y=y)
+    match var:
+        case "availability":
+            ta = TileAddress(version=version, var=var, species="all", time="current", z=z, x=x, y=y)
+        case _:
+            ta = TileAddress(version=version, var=var, species=species, time=time, z=z, x=x, y=y)
     storage = create_storage()
     return storage.load_tile(ta)
 
@@ -94,16 +99,50 @@ def _load_tile_cached(version: str, var: str, species: str, time: str, z: int, x
 #################################################################################################
 
 @app.get("/tile/{version}/{var}/{species}/{time}/{z}/{x}/{y}")
-async def get_tile(version: str, var: str, species: str, time: str, z: int, x: int, y: int):
-    """Serve tiles for the map with caching.
+async def get_tile(version: str, var: str, species: str, time: str, z: int, x: int, y: int, apply_mask: bool = False):
+    """Serve tiles for the map with optional mask application.
     
     Includes:
     - In-memory LRU cache (1000 most recent tiles)
     - HTTP cache headers (immutable tiles can be cached aggressively)
+    - Optional mask multiplication: where mask=0, data pixels become transparent
     """
     try:
-        # Load from cache (or blob storage if not cached)
+        # Load data tile from cache
         tile_bytes = _load_tile_cached(version=version, var=var, species=species, time=time, z=z, x=x, y=y)
+        
+        # Apply mask if requested
+        if apply_mask:
+            try:
+                # Load mask tile
+                mask_bytes = _load_tile_cached(version=version, var="mask", species=species, time=time, z=z, x=x, y=y)
+                
+                # Composite: multiply data by mask
+                data_img = Image.open(BytesIO(tile_bytes)).convert("RGBA")
+                mask_img = Image.open(BytesIO(mask_bytes)).convert("RGBA")
+                
+                # Convert to numpy for multiplication
+                data_array = np.array(data_img, dtype=np.float32)  # Shape: (256, 256, 4)
+                mask_array = np.array(mask_img, dtype=np.float32)  # Shape: (256, 256, 4)
+                
+                # Use mask alpha channel as the masking factor
+                # Where mask.alpha=0 (mask=1 in data), keep data
+                # Where mask.alpha=180 (mask=0 in data), fade to transparent
+                mask_factor = 1.0 - (mask_array[:, :, 3] / 255.0)  # Convert alpha to [0, 1] and invert
+                
+                # Apply mask to data: multiply alpha channel
+                data_array[:, :, 3] = data_array[:, :, 3] * mask_factor
+                
+                # Convert back to uint8 and PIL Image
+                composited = Image.fromarray(data_array.astype(np.uint8), "RGBA")
+                
+                # Encode back to PNG bytes
+                buffer = BytesIO()
+                composited.save(buffer, format="PNG", compress_level=6)
+                tile_bytes = buffer.getvalue()
+            except Exception as e:
+                logger.warning(f"Failed to apply mask to tile: {e}, returning unmasked tile")
+                # Fall through and return original tile
         
         # Return with caching headers
         # During development, disable caching so tile updates appear immediately
@@ -205,10 +244,13 @@ class MapVisualizerApp(param.Parameterized):
     species = param.Selector(default=None, objects=[])
     use_mean = param.Boolean(default=True, precedence=1)  # Checkbox: use mean vs specific time
     time_step_index = param.Integer(default=0, bounds=(0, 0), precedence=1)  # Slider for specific timestep
-    show_mask = param.Boolean(default=False)
+    show_mask = param.Boolean(default=False, precedence=1)  # Checkbox: show mask layer
     
     # Preserve map state across updates
     zoom_level = param.Integer(default=2, precedence=-1)
+
+    # Map object
+    map_definition = {}
     
     # Internal mapping of slider index to time parameter (for URL generation)
     _time_index_map = {}  # Maps {slider_index: "mean" or timestep_index}
@@ -276,11 +318,11 @@ class MapVisualizerApp(param.Parameterized):
             logger.error(f"Failed to load metadata: {e}")
             self.map_definition = {}
     
-    @param.depends("variable", "species", "use_mean", "time_step_index", "show_mask", watch=True)
+    @param.depends("variable", "species", "use_mean", "time_step_index", watch=True)
     def _on_params_changed(self):
         """Update visualization when parameters change."""
         time_value = "mean" if self.use_mean else str(self.time_step_index)
-        logger.info(f"[{self.username}] Parameters changed: var={self.variable}, species={self.species}, time={time_value}, mask={self.show_mask}")
+        logger.info(f"[{self.username}] Parameters changed: var={self.variable}, species={self.species}, time={time_value}")
     
     @pn.depends("variable")
     def _generate_colorbar(self):
@@ -324,58 +366,52 @@ class MapVisualizerApp(param.Parameterized):
             logger.warning(f"Failed to generate colorbar: {e}")
             return pn.pane.Markdown("*Colorbar unavailable*")
     
-    @pn.depends("variable", "species", "use_mean", "time_step_index")
+    @pn.depends("variable", "species", "use_mean", "time_step_index", "show_mask")
     def create_map(self):
         """Create a Folium map with tiles from the server."""
         try:
-            # Get the actual time value: use mean or specific timestep
-            time_value = "mean" if self.use_mean else str(self.time_step_index)
-            
-            # Create base map centered on a default location, preserving zoom level
-            m = folium.Map(
+            # Create base map centered on a default location
+            map = folium.Map(
                 location=[20, 0],
                 zoom_start=self.zoom_level,
                 tiles='Esri.OceanBasemap',
             )
-            
+
+            # Get the actual time value: use mean or specific timestep
+            time_value = "mean" if self.use_mean else str(self.time_step_index)
+
             # Add custom tile layer pointing to our tile server
             tile_url = f"/tile/{self.version}/{self.variable}/{self.species}/{time_value}/{{z}}/{{x}}/{{y}}"
+            
+            # Add apply_mask parameter if mask is enabled
+            if self.show_mask:
+                tile_url += "?apply_mask=true"
+
+            opacity = 0.8 if self.show_mask else 0.6
+
+            # Add data tile layer (with mask applied if show_mask is enabled)
             folium.TileLayer(
                 tiles=tile_url,
                 attr="Map Visualizer",
                 name=f"{self.variable} - {self.species}",
-                overlay=True,
+                overlay=False,
                 control=True,
                 max_zoom=self._max_zoom_level,
-                opacity=1.0,  # Full opacity to allow PNG alpha transparency to show through
-                tms=False,  # TMS coordinate scheme (y flipped) since our tiles are in TMS format
-            ).add_to(m)
+                opacity=opacity,
+                tms=False,
+            ).add_to(map)
 
-            # Add custom tile layer pointing to our tile server
-            mask_url = f"/tile/{self.version}/mask/{self.species}/{time_value}/{{z}}/{{x}}/{{y}}"
-            folium.TileLayer(
-                tiles=mask_url,
-                attr="Mask",
-                name=f"Mask - {self.species}",
-                overlay=True,
-                control=True,
-                max_zoom=self._max_zoom_level,
-                opacity=1.0,  # Full opacity to allow PNG alpha transparency to show through
-                tms=False,  # TMS coordinate scheme (y flipped) since our tiles are in TMS format
-            ).add_to(m)
-            
-            folium.LayerControl().add_to(m)
-            
-            # Create an HTML pane that captures zoom level changes
-            map_html = m._repr_html_()
-            
-            # Use a custom callback to capture zoom level from folium's internal state
-            # This is a workaround since folium doesn't expose zoom_level directly in _repr_html_
+            # Add LayerControl only once
+            folium.LayerControl().add_to(map)
+
+            # Return the map as HTML
+            map_html = map._repr_html_()
             return pn.pane.HTML(map_html, sizing_mode='stretch_width', height=1024)
+
         except Exception as e:
             logger.error(f"Failed to create map: {e}")
             return pn.pane.Markdown(f"❌ Error creating map: {str(e)}")
-    
+
     def panel(self):
         """Create the main panel layout."""
         
@@ -388,7 +424,7 @@ class MapVisualizerApp(param.Parameterized):
         logout_button.on_click(on_logout_click)
         
         # Create time controls: checkbox for mean + date selector
-        mean_checkbox = pn.widgets.Checkbox(name="Use Mean", value=True)
+        mean_checkbox = pn.widgets.Checkbox(name="Annual average", value=True)
         mean_checkbox.link(self, value='use_mean')
         
         # Create time selector for specific timesteps (shows actual dates from metadata)
@@ -438,12 +474,18 @@ class MapVisualizerApp(param.Parameterized):
             sizing_mode='stretch_width'
         )
         
+        # Mask toggle
+        mask_checkbox = pn.widgets.Checkbox(name="Show Mask", value=False)
+        mask_checkbox.link(self, value='show_mask')
+        
         controls = pn.Column(
             pn.pane.Markdown("## Map Controls", margin=(0, 10)),
             self.param.version,
             self.param.variable,
             self.param.species,
             time_controls,
+            pn.layout.Divider(),
+            mask_checkbox,
             pn.layout.Divider(),
             self._generate_colorbar,  # Add colorbar here
             width=300,

@@ -14,24 +14,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 from iconfig.iconfig import iConfig
 
+from md.model.models import VariableConfig
+
 # Optional GPU support
 try:
     import cupy as cp
     HAS_CUPY = True
 except ImportError:
     HAS_CUPY = False
-
-
-class VariableConfig(BaseModel):
-    """Configuration for a single variable to be tiled."""
-    name: str
-    colormap: str = "viridis"
-    vmin: Optional[float] = None
-    vmax: Optional[float] = None
-    is_mask: bool = False  # If True, generates to mask/{species}/z/x/y.png
-    # NEW: specify which values should be transparent
-    transparent_values: Optional[list[float]] = None  # e.g., [0.0] or None for default
-    exclude_zero_from_transparent: bool = False
 
 class WebMercatorTiler:
     """Generate Web Mercator tiles from gridded data."""
@@ -69,7 +59,7 @@ class WebMercatorTiler:
         
         return lon_min, lat_min, lon_max, lat_max
     
-    def get_zoom_levels(self,data_shape: Tuple[int, int]) -> Tuple[int, int]:
+    def get_zoom_levels(self, data_shape: Tuple[int, int], calculate: bool=False) -> Tuple[int, int]:
         """
         Determine reasonable zoom levels for data shape.
         
@@ -79,13 +69,15 @@ class WebMercatorTiler:
         Returns:
             (min_zoom, max_zoom)
         """
-        lat_size, lon_size = data_shape
+        _, lon_size = data_shape
+        min_zoom = 0
 
-        # Min zoom covers the entire world
-        min_zoom = self.config("tiler.min_zoom_levels", default=0)
+        if not calculate:
+            # Min zoom covers the entire world
+            min_zoom = self.config("tiler.min_zoom_levels", default=0)
 
-        if (max_zoom := self.config("tiler.max_zoom_levels")) is not None:
-            return min_zoom, max_zoom
+            if (max_zoom := self.config("tiler.max_zoom_levels")) is not None:
+                return min_zoom, max_zoom
         
         # Calculate based on data resolution
         # Higher max zoom if we have high resolution data
@@ -363,8 +355,11 @@ class BatchTileBuilder:
             # PRE-COMPUTE vmin/vmax if not provided (optimization: do once per variable)
             computed_vmin = var_config.vmin
             computed_vmax = var_config.vmax
-            
-            if computed_vmin is None or computed_vmax is None:
+
+            if var_config.is_mask:
+                computed_vmin = 0.0
+                computed_vmax = 1.0            
+            elif computed_vmin is None or computed_vmax is None:
                 logger.info(f"  Pre-computing value range for {var_name}")
                 all_data = data_array.values
                 all_data = np.nan_to_num(all_data, nan=0.0)
@@ -373,9 +368,9 @@ class BatchTileBuilder:
                 
                 if valid_mask.any():
                     if computed_vmin is None:
-                        computed_vmin = float(np.percentile(all_data[valid_mask], 2))
+                        computed_vmin = float(np.min(all_data[valid_mask]))
                     if computed_vmax is None:
-                        computed_vmax = float(np.percentile(all_data[valid_mask], 98))
+                        computed_vmax = float(np.max(all_data[valid_mask]))
                     logger.info(f"    vmin={computed_vmin:.4f}, vmax={computed_vmax:.4f}")
             
             # Update the variable config with pre-computed vmin/vmax for use in tile generation
@@ -756,29 +751,50 @@ class BatchTileBuilder:
         # 1) Compute lon/lat for each pixel center in the tile (WebMercator geometry)
         lon2d, lat2d = self._tile_lonlat_grid(z=z, x=x, y=y, tile_size=self.tiler.TILE_SIZE)
 
+        # Convert to float for interpolation (masks are boolean)
+        data = data.astype(float)
+
         # 2) Sample the source grid on that geometry (bilinear interpolation)
         tile_vals = self._sample_regular_latlon_grid_bilinear(data=data, lon=lon2d, lat=lat2d)
 
         # 3) Identify transparent pixels BEFORE converting to NaN (needed for step 5)
         transparent_mask = None
-        if var_config.transparent_values:
+        if not is_mask and var_config.transparent_values:
             transparent_normalized = [float(v) for v in var_config.transparent_values]
             transparent_mask = np.isin(tile_vals.astype(float), transparent_normalized)
             if np.any(transparent_mask):
                 tile_vals = np.where(transparent_mask, np.nan, tile_vals)
 
-        # 4) Normalize + colormap (NaNs become alpha=0)
-        tile_norm = self.renderer.normalize_data(
-            tile_vals,
-            vmin=var_config.vmin,
-            vmax=var_config.vmax,
-        )
-        tile_rgba = self.renderer.apply_colormap(data=tile_norm, colormap_name=var_config.colormap)
+        # 4) Handle mask tiles differently: use values as alpha channel
+        if is_mask:
+            # For mask layers: normalize mask values to [0, 1] then invert for alpha
+            # mask=0 -> alpha=255 (opaque, blocks data layer, shows base layer)
+            # mask=1 -> alpha=0 (transparent, shows data layer through)
 
-        # 5) For mask layers: explicitly set alpha=0 where transparent values occur
-        # This ensures zero values show the basemap through instead of white
-        if is_mask and transparent_mask is not None:
-            tile_rgba[transparent_mask, 3] = 0  # Set alpha channel to fully transparent
+            tile_norm = self.renderer.normalize_data(
+                tile_vals,
+                vmin=var_config.vmin if var_config.vmin is not None else 0,
+                vmax=var_config.vmax if var_config.vmax is not None else 1,
+            )
+            # Create RGBA with white RGB and inverted alpha (1 - mask)
+            h, w = tile_norm.shape
+            tile_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            tile_rgba[:, :, :3] = 255  # White RGB
+            # Alpha channel: inverted normalized mask * 255 (0-255)
+            # Where mask=1, alpha=0 (transparent); where mask=0, alpha=255 (opaque white)
+            tile_rgba[:, :, 3] = np.nan_to_num((1 - tile_norm) * 255, nan=255).astype(np.uint8)
+        else:
+            # Normal data tiles: apply colormap (NaNs become alpha=0)
+            tile_norm = self.renderer.normalize_data(
+                tile_vals,
+                vmin=var_config.vmin,
+                vmax=var_config.vmax,
+            )
+            tile_rgba = self.renderer.apply_colormap(data=tile_norm, colormap_name=var_config.colormap)
+
+            # 5) For data layers: explicitly set alpha=0 where transparent values occur
+            if transparent_mask is not None:
+                tile_rgba[transparent_mask, 3] = 0  # Set alpha channel to fully transparent
 
         # 6) Queue tile for parallel saving
         self._queue_tile_save(
@@ -839,7 +855,8 @@ class BatchTileBuilder:
         # NOTE: Do NOT flip here. tile_rgba is already oriented with row 0 = North (Leaflet XYZ).
         mode = "RGBA" if tile_data.shape[2] == 4 else "RGB"
         img = Image.fromarray(tile_data.astype(np.uint8), mode=mode)
-        img.save(tile_file, "png")
+        # Use compress_level=6 for speed+size balance: ~10% CPU savings vs level 9 with minimal file size penalty
+        img.save(tile_file, "png", compress_level=6)
 
 
 def build_tiles_batch(
