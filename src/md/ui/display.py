@@ -270,18 +270,18 @@ class MapVisualizerApp(param.Parameterized):
         """Fetch metadata directly from storage."""
         try:
             storage = create_storage()
-            map_definition = storage.load_map_definition(version_id=self.version)
+            self.map_definition = storage.load_map_definition(version_id=self.version)
             
-            if map_definition is None:
+            if self.map_definition is None:
                 logger.warning(f"Metadata not found for version {self.version}")
                 self.map_definition = {}
                 return
 
             # Populate parameter choices from metadata
-            if "variables" not in map_definition:
+            if "variables" not in self.map_definition:
                 raise ValueError("Metadata is missing 'variables' key")
             
-            self.variable_configs = map_definition.variables
+            self.variable_configs = self.map_definition.variables
             varnames = [var.name for var in self.variable_configs if not var.is_mask]
             self.param.variable.objects = varnames
             self.variable = varnames[0]
@@ -290,26 +290,26 @@ class MapVisualizerApp(param.Parameterized):
             self.vmin = self.variable_configs[0].vmin
             self.vmax = self.variable_configs[0].vmax
             
-            if "species" in map_definition:
-                self.param.species.objects = map_definition.get("species", [])
-                if map_definition.get("species"):
-                    self.species = map_definition["species"][0]
+            if "species" in self.map_definition:
+                self.param.species.objects = self.map_definition.get("species", [])
+                if self.map_definition.get("species"):
+                    self.species = self.map_definition["species"][0]
             
             # Build time slider: map slider position (0=mean, 1+=timesteps) to time index
             self._time_index_map = {}
             
-            if "time_labels" in map_definition and "time_range" in map_definition:
-                time_labels = map_definition.get("time_labels", [])
-                time_range = map_definition.get("time_range", [])
+            if "time_labels" in self.map_definition and "time_range" in self.map_definition:
+                time_labels = self.map_definition.get("time_labels", [])
+                time_range = self.map_definition.get("time_range", [])
                 for idx, label in zip(time_range, time_labels):
                     self._time_index_map[str(idx)] = label
-            elif "time_labels" in map_definition:
-                time_labels = map_definition.get("time_labels", [])
+            elif "time_labels" in self.map_definition:
+                time_labels = self.map_definition.get("time_labels", [])
                 for idx, label in enumerate(time_labels):
                     self._time_index_map[str(idx)] = label
 
-            elif "time_range" in map_definition:
-                time_range = map_definition.get("time_range", [])
+            elif "time_range" in self.map_definition:
+                time_range = self.map_definition.get("time_range", [])
                 for idx in time_range:
                     self._time_index_map[str(idx)] = str(idx)
             
@@ -339,16 +339,29 @@ class MapVisualizerApp(param.Parameterized):
             vmax = variable_config.vmax
             
             # Create a simple colorbar image
-            fig, ax = plt.subplots(figsize=(1.5, 4), dpi=100)
+            fig, ax = plt.subplots(figsize=(2, 6), dpi=100)
             cmap = cm.get_cmap(colormap_name)
             
-            # Create gradient data: 0 to 1 on y-axis
-            gradient = np.linspace(vmin, vmax, 256).reshape(256, 1)
-            
-            # Display gradient
-            ax.imshow(gradient, aspect='auto', cmap=cmap, origin='lower', extent=[0, 1, vmin, vmax])
+            if variable_config.type == "categorical":
+                gradient = np.arange(vmin, vmax+1).reshape(-1, 1)
+                
+                # Set up category labels
+                ax.imshow(gradient, aspect='auto', cmap=cmap, origin='lower', extent=[0, 1, vmin, vmax])
+                
+                # Set tick positions to center of each cell
+                num_cells = int(vmax - vmin + 1)
+                tick_positions = vmin + (np.arange(num_cells) + 0.5) * (vmax - vmin) / num_cells
+                ax.set_yticks(tick_positions)
+                category_labels = self.map_definition['categorical_labels'].get(variable_config.name, {}) if 'categorical_labels' in self.map_definition else {}
+                labels = {i:label for i, label in enumerate(category_labels)} if category_labels else {}
+                ax.set_yticklabels([labels.get(i, str(i)) for i in range(num_cells)])
+            else:
+                gradient = np.linspace(vmin, vmax, 256).reshape(256, 1)
+                ax.imshow(gradient, aspect='auto', cmap=cmap, origin='lower', extent=[0, 1, vmin, vmax])
             ax.set_xticks([])
-            ax.set_ylabel('Value', fontsize=14)
+            unit = self.map_definition['units'].get(variable_config.name, "") if 'units' in self.map_definition else ""
+            y_label = f"{variable_config.name} [{unit}]" if unit else variable_config.name
+            ax.set_ylabel(y_label, fontsize=14)
             ax.tick_params(axis='y', labelsize=12)
             
             plt.tight_layout()
@@ -360,7 +373,7 @@ class MapVisualizerApp(param.Parameterized):
             img_base64 = base64.b64encode(buffer.read()).decode()
             plt.close(fig)
             
-            html = f'<img src="data:image/png;base64,{img_base64}" width="100" style="margin: 10px 0;"/>'
+            html = f'<img src="data:image/png;base64,{img_base64}" width="150" style="margin: 10px 0;"/>'
             return pn.pane.HTML(html)
         except Exception as e:
             logger.warning(f"Failed to generate colorbar: {e}")

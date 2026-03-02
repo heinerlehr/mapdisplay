@@ -187,6 +187,12 @@ def create_mapdefinition(config: iConfig, version: Version, ds: xr.Dataset, vari
 
     species = ds["species"].values.tolist() if "species" in ds.dims else []
 
+    categorical_labels = {
+        'limiting_factor':
+        ds['limiting_factor_parameters'].values.tolist() if 'limiting_factor_parameters' in ds.data_vars else None
+    }
+    units = {var.name: ds[var.name].attrs.get('units') for var in variables}
+
     map_definition = MapDefinition(
         version_id=version.id,
         created_at=version.created_at.isoformat(),
@@ -197,6 +203,8 @@ def create_mapdefinition(config: iConfig, version: Version, ds: xr.Dataset, vari
         time_labels=time_labels,
         species=species,  # Could be populated with species if dataset has species dimension
         zoom_levels=zoom_levels,
+        categorical_labels=categorical_labels,
+        units=units,
     )
     return map_definition
 
@@ -257,39 +265,24 @@ def run_tile_builder(
         if not mappable_vars:
             logger.warning(f"No configured variables found in dataset. Configured vars: {vars_to_tile}")
             return
+        
     for var_name, var_info in mappable_vars.items():
-        # Choose appropriate colormap for non-mask variables
-        if var_info["is_mask"]:
-            colormap = "Reds"  # Default for masks; may be overridden below
-        else:
-            # Default colormaps based on common ocean variable names
-            if "suitability" in var_name.lower():
-                colormap = "coolwarm"
-            elif "availability" in var_name.lower():
-                colormap = "viridis"
-            elif "limiting_factor" in var_name.lower():
-                colormap = "viridis"
-            elif "cultivate_species" in var_name.lower():
-                colormap = "twilight"
-            else:
-                colormap = "viridis"  # Default
-        
-        # Get transparent_values from config if available
-        transparent_values = None
-        exclude_zero_from_transparent = False
-        if tiler_vars := config("tiler.variables", default=None):
-            for var_cfg in tiler_vars:
-                if var_cfg.get("name") == var_name:
-                    transparent_values = var_cfg.get("transparent_values", None)
-                    exclude_zero_from_transparent = var_cfg.get("exclude_zero_from_transparent", False)
-                    if transparent_values:
-                        logger.info(f"Variable {var_name}: transparent_values={transparent_values}, exclude_zero={exclude_zero_from_transparent}")
-                    break
-        
-        # Special handling for mask layers: make zero (invalid/masked regions) transparent
-        if var_name == mask_name and transparent_values is None:
-            colormap = "Reds"  # Use red for invalid regions (more intuitive than gray)
-            transparent_values = [0]  # Make zero values (invalid data) transparent
+
+        # Get type, colormap and mean method from config if available
+        var_cfg = next((v for v in config("tiler.variables", default=[]) if v.get("name") == var_name), {})
+        var_type = var_cfg.get("type", "numerical")
+        mean_method = var_cfg.get("mean", "mean")
+        colormap = var_cfg.get("colormap", None)
+        exclude_zero_from_transparent = var_cfg.get("exclude_zero_from_transparent", False)
+        transparent_values = var_cfg.get("transparent_values", None)
+        preprocess = var_cfg.get("preprocess", None)
+
+        # Choose appropriate colormap for mask variables
+        if (var_name == mask_name or var_info["is_mask"]):
+            colormap = "Reds" 
+            # Special handling for mask layers: make zero (invalid/masked regions) transparent
+            if transparent_values is None:
+                transparent_values = [0]  # Make zero values (invalid data) transparent
         
         variables.append(VariableConfig(
             name=var_name,
@@ -297,6 +290,9 @@ def run_tile_builder(
             is_mask=var_info["is_mask"],
             transparent_values=transparent_values,
             exclude_zero_from_transparent=exclude_zero_from_transparent,
+            type=var_type,
+            mean=mean_method,
+            preprocess=preprocess,
         ))
     
     logger.info(f"Variables to tile: {[v.name for v in variables]}")

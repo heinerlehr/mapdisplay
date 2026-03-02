@@ -9,7 +9,6 @@ import xarray as xr
 from PIL import Image
 import matplotlib.pyplot as plt
 from loguru import logger
-from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor
 
 from iconfig.iconfig import iConfig
@@ -116,6 +115,7 @@ class DataRenderer:
     
     @staticmethod
     def normalize_data(
+        var_config: VariableConfig,
         data: np.ndarray,
         vmin: Optional[float] = None,
         vmax: Optional[float] = None,
@@ -123,8 +123,10 @@ class DataRenderer:
     ) -> np.ndarray:
         """
         Normalize data to [0, 1] range, preserving NaN values for transparency.
+        For categorical data, maps discrete values proportionally across colormap.
         
         Args:
+            var_config: VariableConfig containing variable settings
             data: Input array (may contain NaN values for transparency)
             vmin/vmax: Value range for normalization
             clip_outliers: Clip values outside vmin/vmax
@@ -143,21 +145,19 @@ class DataRenderer:
             valid_mask = data_for_stats > -999
             if valid_mask.any():
                 if vmin is None:
-                    vmin = float(np.percentile(data_for_stats[valid_mask], 2))
+                    vmin = float(np.min(data_for_stats[valid_mask]))
                 if vmax is None:
-                    vmax = float(np.percentile(data_for_stats[valid_mask], 98))
+                    vmax = float(np.max(data_for_stats[valid_mask]))
             else:
                 vmin = vmin or 0.0
                 vmax = vmax or 1.0
         
-        # Normalize to [0, 1]
+        # For categorical data, normalize by dividing by max value to spread categories
+        # across the full colormap range (e.g., tab10: value 0->0/8, value 8->8/8=1.0)
         if (vmax - vmin) > 0:
-            normalized = (data - vmin) / (vmax - vmin)
+            normalized = var_config.scale(data, vmin, vmax)
         else:
             normalized = np.zeros_like(data)
-        
-        if clip_outliers:
-            normalized = np.clip(normalized, 0, 1)
         
         # Restore NaN values after normalization
         normalized[nan_mask] = np.nan
@@ -166,21 +166,23 @@ class DataRenderer:
     
     def apply_colormap(
         self,
+        var_config: VariableConfig,
         data: np.ndarray,
-        colormap_name: str = "viridis",
         transparent_values: Optional[List[float]] = None,
     ) -> np.ndarray:
         """
         Apply colormap to normalized data.
+        For categorical data, normalized values map to distinct colors.
         
         Args:
+            var_config: VariableConfig containing variable settings
             data: Normalized data in [0, 1]
-            colormap_name: Matplotlib colormap name
             transparent_values: List of values to be made transparent (alpha=0)
         Returns:
             RGBA image array (height, width, 4) with values in [0, 255]
         """
-        cmap = self.get_colormap(colormap_name)
+        cmap = self.get_colormap(var_config.colormap or "coolwarm")
+
         rgba = cmap(data)
         
         # Convert to uint8
@@ -349,8 +351,11 @@ class BatchTileBuilder:
                 logger.warning(f"Variable {var_name} not found in dataset, skipping")
                 continue
             
-            data_array = self.ds[var_name]
             logger.info(f"Processing variable: {var_name}")
+            # Preprocess the data where necessary
+            data_array = var_config.process(self.ds, 
+                                            var=var_name, 
+                                            mask_name=self.config("tiler.mask",default="mask"))
             
             # PRE-COMPUTE vmin/vmax if not provided (optimization: do once per variable)
             computed_vmin = var_config.vmin
@@ -361,17 +366,9 @@ class BatchTileBuilder:
                 computed_vmax = 1.0            
             elif computed_vmin is None or computed_vmax is None:
                 logger.info(f"  Pre-computing value range for {var_name}")
-                all_data = data_array.values
-                all_data = np.nan_to_num(all_data, nan=0.0)
-                all_data = all_data.astype(float)
-                valid_mask = all_data > -999
-                
-                if valid_mask.any():
-                    if computed_vmin is None:
-                        computed_vmin = float(np.min(all_data[valid_mask]))
-                    if computed_vmax is None:
-                        computed_vmax = float(np.max(all_data[valid_mask]))
-                    logger.info(f"    vmin={computed_vmin:.4f}, vmax={computed_vmax:.4f}")
+                computed_vmin = data_array.min().item()
+                computed_vmax = data_array.max().item()            
+                logger.info(f"    vmin={computed_vmin:.4f}, vmax={computed_vmax:.4f}")
             
             # Update the variable config with pre-computed vmin/vmax for use in tile generation
             var_config.vmin = computed_vmin
@@ -433,17 +430,9 @@ class BatchTileBuilder:
         if computed_vmin is None or computed_vmax is None:
             logger.info(f"  Pre-computing value range for {var_name}")
             # Get all valid data for percentile computation
-            all_data = data_array.values
-            all_data = np.nan_to_num(all_data, nan=0.0)
-            all_data = all_data.astype(float)
-            valid_mask = all_data > -999
-            
-            if valid_mask.any():
-                if computed_vmin is None:
-                    computed_vmin = np.percentile(all_data[valid_mask], 2)
-                if computed_vmax is None:
-                    computed_vmax = np.percentile(all_data[valid_mask], 98)
-                logger.info(f"    vmin={computed_vmin:.4f}, vmax={computed_vmax:.4f}")
+            computed_vmin = data_array.min().item()
+            computed_vmax = data_array.max().item()
+            logger.info(f"    vmin={computed_vmin:.4f}, vmax={computed_vmax:.4f}")
         
         # Detect dimensions
         has_species = self.species_dim in data_array.dims
@@ -484,7 +473,7 @@ class BatchTileBuilder:
                     time_label = str(time_idx)
                 else:
                     time_data = species_data
-                    time_label = "current"
+                    time_label = "mean"
                 
                 # Get lat/lon data
                 if self.latitude_dim not in time_data.dims or self.longitude_dim not in time_data.dims:
@@ -495,7 +484,7 @@ class BatchTileBuilder:
                 data = np.nan_to_num(data, nan=0.0)
                 
                 # Generate tiles (pass pre-computed vmin/vmax)
-                var_config_copy = var_config.copy(update={"vmin": computed_vmin, "vmax": computed_vmax})
+                var_config_copy = var_config.model_copy(update={"vmin": computed_vmin, "vmax": computed_vmax})
                 
                 self._generate_tiles_for_data(
                     data=data,
@@ -508,11 +497,11 @@ class BatchTileBuilder:
             
             # Generate time average if requested and data has time dimension
             if self.include_time_average and has_time:
-                time_averaged = species_data.mean(dim=self.time_dim)
+                time_averaged = var_config.timemean(species_data, dims=self.time_dim)
                 data = time_averaged.values
                 data = np.nan_to_num(data, nan=0.0)
                 
-                var_config_copy = var_config.copy(update={"vmin": computed_vmin, "vmax": computed_vmax})
+                var_config_copy = var_config.model_copy(update={"vmin": computed_vmin, "vmax": computed_vmax})
                 
                 self._generate_tiles_for_data(
                     data=data,
@@ -772,7 +761,8 @@ class BatchTileBuilder:
             # mask=1 -> alpha=0 (transparent, shows data layer through)
 
             tile_norm = self.renderer.normalize_data(
-                tile_vals,
+                var_config=var_config,
+                data = tile_vals,
                 vmin=var_config.vmin if var_config.vmin is not None else 0,
                 vmax=var_config.vmax if var_config.vmax is not None else 1,
             )
@@ -786,11 +776,12 @@ class BatchTileBuilder:
         else:
             # Normal data tiles: apply colormap (NaNs become alpha=0)
             tile_norm = self.renderer.normalize_data(
-                tile_vals,
+                var_config=var_config,
+                data = tile_vals,
                 vmin=var_config.vmin,
                 vmax=var_config.vmax,
             )
-            tile_rgba = self.renderer.apply_colormap(data=tile_norm, colormap_name=var_config.colormap)
+            tile_rgba = self.renderer.apply_colormap(var_config=var_config, data=tile_norm)
 
             # 5) For data layers: explicitly set alpha=0 where transparent values occur
             if transparent_mask is not None:

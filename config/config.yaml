@@ -9,7 +9,7 @@ preprocess:
     max_workers: 128 # number of parallel workers for tile I/O operations (default: 4)
 
 tiler:
-    max_zoom_levels: 4
+    max_zoom_levels: 6
     time_range: [2024-01-01, 2024-12-31] # optional time range for tiling (default: null)
     resolution: 0.25x0.25
     copernicus_longitude:
@@ -17,16 +17,30 @@ tiler:
         end: 180
     copernicus_latitude:
         start: -80
-        end: 90    
+        end: 90
     variables:
         - name: suitability
+          type: numerical
           transparent_values: [0.0]
+          colormap: coolwarm
+
         - name: limiting_factor
           exclude_zero_from_transparent: true
+          type: categorical
+          colormap: tab10
+          mean: mode
+          preprocess: mask
+
         - name: yield
+          type: numerical
           transparent_values: [0.0]
-        - name: availability
-          transparent_values: [0.0]
+          colormap: coolwarm
+          mean: annual
+
+        # - name: availability
+        #   type: numerical
+        #   transparent_values: [0.0]
+        #   colormap: coolwarm
     mask: mask
 
 mapdisplay:

@@ -2,7 +2,6 @@ import sys
 
 # Argument parsing
 from argparse import ArgumentParser, Namespace
-from pathlib import Path
 
 from dotenv import load_dotenv
 
